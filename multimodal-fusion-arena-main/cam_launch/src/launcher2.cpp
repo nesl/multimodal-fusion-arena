@@ -40,7 +40,7 @@ using namespace std;
 //TODO: use ros::Time::now() to sync timestamps
 //Create octree with resolution 0.15 sized voxels
 pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *octree = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.15);
-pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *dummyOctree = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.15);
+pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *previousTree = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.15);
 pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *octree2 = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.25);
 //Used to keep track of when to swap in new background to reduce drift
 double lastUpdate;
@@ -51,7 +51,13 @@ ros::Publisher cloud_publisher;
 ros::Publisher color_publisher;
 pcl::PointCloud<pcl::PointXYZRGB>::Ptr origFrame(new pcl::PointCloud<pcl::PointXYZRGB>());
 PersonArr arrOfPeople;
-Eigen::Matrix4d transformMatrix;
+Eigen::Matrix3d rotationMatrix;
+Eigen::Vector3d translationMatrix(0, 0, 0);
+const double DIFFERING_PROPORTION_UPPER = 0.1;
+const double DIFFERING_PROPORTION_LOWER = 0.05;
+int initialDownsampleRate = 2;
+int secondDownsampleRate = 11;
+
 //Get absolute difference between nesl coords
 double computeAbsDiff(NeslCoord coord1, NeslCoord coord2) {
     double diff = (coord1.x - coord2.x) * (coord1.x - coord2.x) +
@@ -80,21 +86,25 @@ long frameCount = 900; //what is this??
 //process function that takes in a pointcloud and publishes the centroid coordinates as well as the subtracted cloud
 void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
 {
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr data_down(new pcl::PointCloud<pcl::PointXYZRGB>());
     double octreeStartTime = ros::Time::now().toSec();
+    for (int i = 0; i < data->points.size(); i += 11) {
+        data_down->push_back(data->points[i]);
+    }
     //Fill octree with pointcloud data
-    octree->setInputCloud(data);
+    octree->setInputCloud(data_down);
     octree->addPointsFromInputCloud();
     std::vector<int> diff_point_vector;
     octree->getPointIndicesFromNewVoxels(diff_point_vector); //Extract points that differ
     int size = diff_point_vector.size();                     //Store in size variable to avoid calling .size() in loop
     //If octree freaks out and somehow deletes the reference buffer
-    if (size > 0.8 * data->points.size()) {
+    if (size > 0.8 * data_down->points.size()) {
         octree->deleteTree();
         octree->setInputCloud(origFrame);
         octree->addPointsFromInputCloud();
         octree->switchBuffers();
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr tempCloud(new pcl::PointCloud<pcl::PointXYZRGB>());
-        *tempCloud = *data;
+        *tempCloud = *data_down;
         octree->setInputCloud(tempCloud);
         octree->addPointsFromInputCloud();
         octree->switchBuffers();
@@ -109,24 +119,24 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     //Parallelizing doesn't seem to result in significant performance gain
     for (int pc_counter = 0; pc_counter < size; pc_counter++)
     {
-        diff_cloud_ptr->points.push_back(data->points[diff_point_vector[pc_counter]]);
+        diff_cloud_ptr->points.push_back(data_down->points[diff_point_vector[pc_counter]]);
     }
 
     //In case of small point cloud, simply return
-    if (diff_point_vector.size() < 1000)
+    if (diff_point_vector.size() < 200)
     {
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
         temp_cloud->header.frame_id = "backgone3";
         pub.publish(temp_cloud);
         return;
     }
+    
     //Utilize a VoxelGrid filter to downsample pointcloud, makes later data processing much faster
 
     pcl::VoxelGrid<pcl::PointXYZRGB> filter;
     filter.setInputCloud(diff_cloud_ptr);
     filter.setLeafSize(0.027, 0.027f, 0.027f); //Might be able to adjust this to a larger value since we don't need high resolution for this pointcloud
     filter.filter(*diff_cloud_ptr);
-
 
     //PCL segmentation functions that help extract meaningful features
     pcl::SACSegmentation<pcl::PointXYZRGB> seg;
@@ -161,7 +171,7 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
     ec.setClusterTolerance(0.1); // 10cm
-    ec.setMinClusterSize(500);   //Adjust this to detect people only, depends on how camera is oriented
+    ec.setMinClusterSize(200);   //Adjust this to detect people only, depends on how camera is oriented
     ec.setMaxClusterSize(70000);
     ec.setSearchMethod(tree);
     ec.setInputCloud(diff_cloud_ptr);
@@ -230,9 +240,7 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
         //Add to NeslCoord object to send as custom ros message
         pcl::PointXYZ c1;
         centroid.get(c1);
-        pcl::CropBox<pcl::PointXYZRGB> boxFilter;
-        std::cout << c1.x << " " << c1.y << " " << c1.z << std::endl;
-        //Cropbox filter on original pointcloud
+        pcl::CropBox<pcl::PointXYZRGB> boxFilter;        //Cropbox filter on original pointcloud
         boxFilter.setMin(Eigen::Vector4f(c1.x - ((maxX - minX) / 2 + 0.05), c1.y - ((maxY - minY) / 2 + 0.05), c1.z - ((maxZ - minZ) / 2 + 0.05), 1.0));
         boxFilter.setMax(Eigen::Vector4f(c1.x + ((maxX - minX) / 2 + 0.05), c1.y + ((maxY - minY) / 2 + 0.05), c1.z + ((maxZ - minZ) / 2 + 0.05), 1.0));
         boxFilter.setInputCloud(data);
@@ -242,12 +250,15 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
         boxFilter.filter(*temp_cloud);
         *background_points += *temp_cloud;
         NeslCoord c;
-        Eigen::Vector4d camVector(c1.x, c1.y, c1.z, 1);
-        camVector = transformMatrix * camVector;
+        Eigen::Vector3d camVector(c1.x + translationMatrix(0), c1.y + translationMatrix(1),
+         c1.z + translationMatrix(2));
+        camVector = rotationMatrix * camVector;
         c.x = camVector(0);
         c.y = camVector(1);
         c.z = camVector(2);
         double probability = 0;
+        std::cout << "Old: "  << c1.x << " " << c1.y << " " << c1.z << " New: ";
+        std::cout << c.x << " " << c.y << " " << c.z << std::endl;
         //Compute probability for person being misidentified
         for (int i = 0; i < arrOfPeople.personArr.size(); i++) {
             if (c.x == arrOfPeople.personArr.at(i).personCoord.x && c.z == arrOfPeople.personArr.at(i).personCoord.z) {
@@ -324,12 +335,30 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     for (int pc_counter = 0; pc_counter < size2; pc_counter++)
     {
         pcl::PointXYZRGB tempPoint = person_clusters->points[different_points[pc_counter]];
-        Eigen::Vector4d coordVec(tempPoint.x, tempPoint.y, tempPoint.z, 1);
-        coordVec = transformMatrix * coordVec;
+        Eigen::Vector3d coordVec(tempPoint.x + translationMatrix(0), tempPoint.y + translationMatrix(1), tempPoint.z + translationMatrix(2));
+        coordVec = rotationMatrix * coordVec;
         tempPoint.x = coordVec(0);
         tempPoint.y = coordVec(1);
         tempPoint.z = coordVec(2);
         person_clusters_filtered->points.push_back(tempPoint);
+    }
+    previousTree->setInputCloud(person_clusters_filtered);
+    previousTree->addPointsFromInputCloud();
+    std::vector<int> newPoints;
+    previousTree->getPointIndicesFromNewVoxels(newPoints);
+    previousTree->switchBuffers();
+    std::cout << newPoints.size() / ((double) person_clusters_filtered->points.size()) << std::endl;
+    if (newPoints.size() / ((double) person_clusters_filtered->points.size()) > DIFFERING_PROPORTION_UPPER) {
+        initialDownsampleRate = 2;
+        secondDownsampleRate = 11;
+    }
+    else if (newPoints.size() / ((double) person_clusters_filtered->points.size()) < DIFFERING_PROPORTION_LOWER) {
+        initialDownsampleRate = 1;
+        secondDownsampleRate = 23;
+    }
+    else {
+        initialDownsampleRate = 2;
+        secondDownsampleRate = 9;
     }
     //Timestamp and publish
     person_clusters_filtered->header.stamp = (long) (ros::Time::now().toSec() * 1e6);
@@ -338,18 +367,24 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     person_clusters_filtered->header.frame_id = "backgone3";
     pub.publish(person_clusters_filtered);
     pub2.publish(arrOfPeople);
+    
 }
 
 //Initializes the camera by setting reference frame
 void initializeCamera(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
 {
+    *origFrame = *data;
+    pcl::VoxelGrid<pcl::PointXYZRGB> filter;
+    filter.setInputCloud(data);
+    filter.setLeafSize(0.027, 0.027f, 0.027f); //Might be able to adjust this to a larger value since we don't need high resolution for this pointcloud
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampledData(new pcl::PointCloud<pcl::PointXYZRGB>);
+    filter.filter(*downsampledData);
     //THIS CODE IS WEIRD BUT IT FIXES AN ISSUE
     octree->deleteCurrentBuffer();
-    octree->setInputCloud(data);
+    octree->setInputCloud(downsampledData);
     octree->addPointsFromInputCloud();
     octree->switchBuffers();
-    *origFrame = *data;
-    octree->setInputCloud(origFrame);
+    octree->setInputCloud(downsampledData);
     octree->addPointsFromInputCloud();
     octree->switchBuffers();
     std::cout << "Initializing" << std::endl;
@@ -363,10 +398,9 @@ void getTransform(cv::Mat cameraMatrix, cv::Mat distCoeffs, cv::Mat image) {
     std::vector<std::vector<cv::Point2f>> corners;
     cv::aruco::detectMarkers(image, dictionary, corners, ids);
     cv::Mat imageCopy;
-    transformMatrix << 1, 0, 0, 0,
-                       0, 1, 0, 0, 
-                       0, 0, 1, 0,
-                       0, 0, 0, 1;
+    rotationMatrix << 1, 0, 0,
+                      0, 1, 0,
+                      0, 0, 0;
     std::cout << "Marker number is:" << ids.size() << std::endl;
     if (ids.size() > 0) {
         image.copyTo(imageCopy);
@@ -376,14 +410,11 @@ void getTransform(cv::Mat cameraMatrix, cv::Mat distCoeffs, cv::Mat image) {
         cv::Mat rotationArr;
         cv::Rodrigues(rvecs.at(0), rotationArr);
         Eigen::Matrix4d tempMatrix;
-        tempMatrix << rotationArr.at<double>(0, 0), rotationArr.at<double>(0, 1), rotationArr.at<double>(0, 2), tvecs.at(0)[0],
-                           rotationArr.at<double>(1, 0), rotationArr.at<double>(1, 1), rotationArr.at<double>(1, 2), tvecs.at(0)[1],
-                           rotationArr.at<double>(2, 0), rotationArr.at<double>(2, 1), rotationArr.at<double>(2, 2), tvecs.at(0)[2],
-                           0, 0, 0, 1;
-        transformMatrix = tempMatrix;
+        rotationMatrix << rotationArr.at<double>(0, 0), rotationArr.at<double>(1, 0), rotationArr.at<double>(2, 0),
+                           rotationArr.at<double>(0, 1), rotationArr.at<double>(1, 1), rotationArr.at<double>(2, 1),
+                           rotationArr.at<double>(0, 2), rotationArr.at<double>(1, 2), rotationArr.at<double>(2, 2);
+        translationMatrix = Eigen::Vector3d(-tvecs.at(0)[0], -tvecs.at(0)[1], -tvecs.at(0)[2]);
     }
-    std::cout << transformMatrix << std::endl;
-
 }
 
 int main(int argc, char *argv[])
@@ -398,8 +429,10 @@ int main(int argc, char *argv[])
     pub2 = nh.advertise<PersonArr>("/camera3/people", 2);
     //Only enable camera and depth, other streams will likely cause more latency
     rs2::points points;
-    cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGB8, 30);
-    cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
+    cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, 30);
+    cfg.enable_stream(RS2_STREAM_DEPTH, 1024, 768, RS2_FORMAT_Z16, 30);
+    //cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_RGB8, 30);
+   // cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
     // Declare RealSense pipeline, encapsulating the actual device and sensors
     rs2::pipeline pipe;
     // Start streaming with default recommended configuration
@@ -422,16 +455,15 @@ int main(int argc, char *argv[])
     cv::Mat distortionMatrix(1, 5, CV_32FC1, tempIntrinsics);
     int currNumFrames = 0;
     bool initializing = true;
-
     while (ros::ok())
     { //ros::ok()??
         //Get relevant frame data
         auto frames = pipe.wait_for_frames();
         auto depth = frames.get_depth_frame();
         auto color = frames.get_color_frame();
+        double startTime = ros::Time::now().toSec();
         //map pointcloud to color? (I don't really know what this does)
         pc.map_to(color);
-        double startTime = ros::Time::now().toSec();
         int colorHeight = color.get_height();
         int colorWidth = color.get_width();
         int colorBytes = color.get_bytes_per_pixel();
@@ -461,11 +493,11 @@ int main(int argc, char *argv[])
         auto Vertex = points.get_vertices();
 
         int pointSize = points.size();
-
         //Only utilizes every third point to downsample higher up the pipeline and improve performance
         //On Intel NUC, 30fps is achieved such that the limiting factor is the framerate of camera!!
         
-        for (int i = 0; i < pointSize; i += 3)
+        double startTime2 = ros::Time::now().toSec();
+        for (int i = 0; i < pointSize; i+=2)
         {
             pcl::PointXYZRGB temp;
             auto tempVertexElem = Vertex[i];
@@ -481,7 +513,7 @@ int main(int argc, char *argv[])
             temp.b = colorArr[Text_Index + 2];
             pcl_points->points.push_back(temp);
         }
-
+        //std::cout << ros::Time::now().toSec() - startTime2 << std::endl;
         pcl_points->header.frame_id = "PC3";
         color_img.header.frame_id = "color_img3";
         color_img.width = colorWidth;
@@ -494,6 +526,14 @@ int main(int argc, char *argv[])
         //CYCLE THE BUFFERS OF THE OCTREE, I HAVE NO IDEA WHY THIS FIXES IT
         if (initializing && currNumFrames++ <= 300)
         {
+            if (currNumFrames == 200) {
+                getTransform(camMatrix, distortionMatrix, cv::Mat(colorHeight, colorWidth, CV_8UC3, colorArr));
+                pipe.stop();
+                cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGB8, 30);
+                cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
+                pipe.start(cfg);
+                continue;
+            }
             initializeCamera(pcl_points);
             continue;
         }
@@ -501,8 +541,8 @@ int main(int argc, char *argv[])
         {
             initializeCamera(pcl_points);
             initializing = false;
-            getTransform(camMatrix, distortionMatrix, cv::Mat(colorHeight, colorWidth, CV_8UC3, colorArr));
             std::cout << "Done" << std::endl;
+
         }
         else
         {
@@ -513,7 +553,6 @@ int main(int argc, char *argv[])
         color_img.header.stamp.nsec = (ros::Time::now().toSec() - (int) (ros::Time::now().toSec())) * 1e9;
         cloud_publisher.publish(pcl_points);
         color_publisher.publish(color_img);
-        double timeDiff = ros::Time::now().toSec() - startTime;
-        std::cout << timeDiff << std::endl;
+        //std::cout << ros::Time::now().toSec() - startTime << std::endl;
     }
 }
