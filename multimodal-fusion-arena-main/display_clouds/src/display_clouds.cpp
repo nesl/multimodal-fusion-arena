@@ -20,13 +20,13 @@ using namespace message_filters;
 
 //Determine whether two people from two cameras are the same person
 bool areEqual(NESLMessages::Person person1, NESLMessages::Person person3) {
-    double centroidDiff = sqrt(pow(person1.personCoord.x - person3.personCoord.x, 2) + pow(person1.personCoord.z - person3.personCoord.z, 2));
+    double centroidDiff = sqrt(pow(person1.personCoord.x - person3.personCoord.x, 2) + pow(person1.personCoord.y - person3.personCoord.y, 2));
     double colorDiff = sqrt(pow(person1.colorArr[0] - person3.colorArr[0], 2) + pow(person1.colorArr[1] - person3.colorArr[1], 2) + 
         pow(person1.colorArr[2] - person3.colorArr[2], 2));
-    if (colorDiff < 50 && centroidDiff < 0.2) {
+    if (colorDiff < 75 && centroidDiff < 0.5) {
         return true;
     }
-    return (colorDiff < 50 && centroidDiff < 0.2) || (centroidDiff < 0.05);
+    return centroidDiff < 0.2;
 
 }
 
@@ -37,8 +37,8 @@ void callback(sensor_msgs::PointCloud2::ConstPtr cloud1, sensor_msgs::PointCloud
     NESLMessages::PersonArr arr3 = *arr3Param;
     pcl::PCLPointCloud2 pcl_pc2;
     pcl_conversions::toPCL(*cloud1, pcl_pc2);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr pc1(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr pc3(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr pc1(new pcl::PointCloud<pcl::PointXYZRGB>);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr pc3(new pcl::PointCloud<pcl::PointXYZRGB>);
     pcl::fromPCLPointCloud2(pcl_pc2, *pc1);
     pcl_conversions::toPCL(*cloud3, pcl_pc2);
     pcl::fromPCLPointCloud2(pcl_pc2, *pc3);
@@ -52,6 +52,9 @@ void callback(sensor_msgs::PointCloud2::ConstPtr cloud1, sensor_msgs::PointCloud
                 person1.personCoord.x = (person1.personCoord.x + person3.personCoord.x) / 2;
                 person1.personCoord.y = (person1.personCoord.y + person3.personCoord.y) / 2;
                 person1.personCoord.z = (person1.personCoord.z + person3.personCoord.z) / 2;
+                person1.bbx = (person1.bbx + person3.bbx) / 2.0;
+                person1.bby = (person1.bby + person3.bby) / 2.0;
+                person1.bbz = (person1.bbz + person3.bbz) / 2.0;
                 finalArr.personArr.push_back(person1);
                 arr1.personArr.erase(arr1.personArr.begin() + i);
                 arr3.personArr.erase(arr3.personArr.begin() + j);
@@ -77,12 +80,12 @@ void callback(sensor_msgs::PointCloud2::ConstPtr cloud1, sensor_msgs::PointCloud
 int main(int argc, char ** argv) {
     ros::init(argc, argv, "displayer");
     ros::NodeHandle nh;
-    message_filters::Subscriber<sensor_msgs::PointCloud2> pc1(nh, "camera/clouds/subtracted", 2);
+    message_filters::Subscriber<sensor_msgs::PointCloud2> pc1(nh, "camera1/clouds/subtracted", 5);
     //message_filters::Subscriber pc2(nh, "camera2/cloud", 2);
-    message_filters::Subscriber<sensor_msgs::PointCloud2> pc3(nh, "camera3/clouds/subtracted", 2);
-    message_filters::Subscriber<NESLMessages::PersonArr> coords1(nh, "camera1/people", 2);
+    message_filters::Subscriber<sensor_msgs::PointCloud2> pc3(nh, "camera3/clouds/subtracted", 5);
+    message_filters::Subscriber<NESLMessages::PersonArr> coords1(nh, "camera1/people", 5);
     //message_filters::Subscriber<NESLMessages::PersonArr> coord2(nh, "camera2/people", 2);
-    message_filters::Subscriber<NESLMessages::PersonArr> coords3(nh, "camera3/people", 2);
+    message_filters::Subscriber<NESLMessages::PersonArr> coords3(nh, "camera3/people", 5);
     typedef sync_policies::ApproximateTime<sensor_msgs::PointCloud2, sensor_msgs::PointCloud2,
        NESLMessages::PersonArr, NESLMessages::PersonArr> MySyncPolicy;
     Synchronizer<MySyncPolicy> sync(MySyncPolicy(10), pc1, pc3, coords1, coords3);
