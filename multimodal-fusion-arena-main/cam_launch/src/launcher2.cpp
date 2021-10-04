@@ -41,7 +41,7 @@ using namespace std;
 //Create octree with resolution 0.15 sized voxels
 pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *octree = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.15);
 pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *previousTree = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.15);
-pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *octree2 = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.25);
+pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB> *octree2 = new pcl::octree::OctreePointCloudChangeDetector<pcl::PointXYZRGB>(0.1);
 //Used to keep track of when to swap in new background to reduce drift
 double lastUpdate;
 //Publisher nodes
@@ -127,7 +127,12 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     {
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
         temp_cloud->header.frame_id = "backgone3";
+        temp_cloud->header.stamp = (long) (ros::Time::now().toSec() * 1e6);
         pub.publish(temp_cloud);
+        arrOfPeople.personArr.clear();
+        arrOfPeople.header.stamp.sec = (long) (ros::Time::now().toSec());
+        arrOfPeople.header.stamp.nsec = (ros::Time::now().toSec() - (long) (ros::Time::now().toSec())) * 1e9;
+        pub2.publish(arrOfPeople);
         return;
     }
     
@@ -156,7 +161,12 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     {
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
         temp_cloud->header.frame_id = "backgone3";
+        temp_cloud->header.stamp = (long) (ros::Time::now().toSec() * 1e6);
         pub.publish(temp_cloud);
+        arrOfPeople.personArr.clear();
+        arrOfPeople.header.stamp.sec = (long) (ros::Time::now().toSec());
+        arrOfPeople.header.stamp.nsec = (ros::Time::now().toSec() - (long) (ros::Time::now().toSec())) * 1e9;
+        pub2.publish(arrOfPeople);
         return;
     }
     // Extract the planar inliers from the input cloud
@@ -261,7 +271,7 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
         std::cout << c.x << " " << c.y << " " << c.z << std::endl;
         //Compute probability for person being misidentified
         for (int i = 0; i < arrOfPeople.personArr.size(); i++) {
-            if (c.x == arrOfPeople.personArr.at(i).personCoord.x && c.z == arrOfPeople.personArr.at(i).personCoord.z) {
+            if (c.x != arrOfPeople.personArr.at(i).personCoord.x && c.z != arrOfPeople.personArr.at(i).personCoord.z) {
                 probability += 0.5 / computeAbsDiff(arrOfPeople.personArr.at(i).personCoord, c);
             }
         }
@@ -277,13 +287,17 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
                 arrOfPeople.personArr.at(i).personCoord.y = c.y;
                 arrOfPeople.personArr.at(i).personCoord.z = c.z;
                 arrOfPeople.personArr.at(i).colorArr = tempVec;
-                arrOfPeople.personArr.at(i).bbx = maxX - minX;
-                arrOfPeople.personArr.at(i).bby = maxY - minY;
-                arrOfPeople.personArr.at(i).bbz = maxZ - minZ;
+                Eigen::Vector3d lengthVector(maxX - minX + translationMatrix(0), maxY - minY + translationMatrix(1),
+                    maxZ - minZ + translationMatrix(2));
+                lengthVector = rotationMatrix * lengthVector;
+                arrOfPeople.personArr.at(i).bbx = lengthVector(0);
+                arrOfPeople.personArr.at(i).bby = lengthVector(1);
+                arrOfPeople.personArr.at(i).bbz = lengthVector(2);
                 arrOfPeople.personArr.at(i).accountedFor = true;
                 identified = true;
             }
         }
+        
         //Add to person vector if not identified
         if (!identified) {
             std::vector<double> tempVec; 
@@ -306,7 +320,12 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     if (loopCount3 == 0) {
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
         temp_cloud->header.frame_id = "backgone3";
+        temp_cloud->header.stamp = (long) (ros::Time::now().toSec() * 1e6);
         pub.publish(temp_cloud);
+        arrOfPeople.personArr.clear();
+        arrOfPeople.header.stamp.sec = (long) (ros::Time::now().toSec());
+        arrOfPeople.header.stamp.nsec = (ros::Time::now().toSec() - (long) (ros::Time::now().toSec())) * 1e9;
+        pub2.publish(arrOfPeople);
         return;
     }
     //Remove all past people that did not show up in current frame
@@ -347,6 +366,7 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     std::vector<int> newPoints;
     previousTree->getPointIndicesFromNewVoxels(newPoints);
     previousTree->switchBuffers();
+    /*
     std::cout << newPoints.size() / ((double) person_clusters_filtered->points.size()) << std::endl;
     if (newPoints.size() / ((double) person_clusters_filtered->points.size()) > DIFFERING_PROPORTION_UPPER) {
         initialDownsampleRate = 2;
@@ -360,6 +380,7 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
         initialDownsampleRate = 2;
         secondDownsampleRate = 9;
     }
+    */
     //Timestamp and publish
     person_clusters_filtered->header.stamp = (long) (ros::Time::now().toSec() * 1e6);
     arrOfPeople.header.stamp.sec = (long) (ros::Time::now().toSec());
