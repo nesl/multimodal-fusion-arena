@@ -68,7 +68,7 @@ int secondDownsampleRate = 11;
 //ID number of identified person
 int personIDNum = 0;
 //String of the camera number
-std::string cameraNum = "3"
+std::string cameraNum = "3";
 
 //Get absolute difference between nesl coords
 double computeAbsDiff(NeslCoord coord1, NeslCoord coord2) {
@@ -145,8 +145,8 @@ std::vector<pcl::PointIndices> getClusters(pcl::PointCloud<pcl::PointXYZRGB>::Pt
     tree->setInputCloud(diff_cloud_ptr);
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
-    ec.setClusterTolerance(0.1); // 10cm
-    ec.setMinClusterSize(200);   //Adjust this to detect people only, depends on how camera is oriented
+    ec.setClusterTolerance(0.15); // 15cm
+    ec.setMinClusterSize(100);   //Adjust this to detect people only, depends on how camera is oriented
     ec.setMaxClusterSize(70000);
     ec.setSearchMethod(tree);
     ec.setInputCloud(diff_cloud_ptr);
@@ -190,11 +190,13 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
         octree->addPointsFromInputCloud();
         octree->switchBuffers();
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr tempCloud(new pcl::PointCloud<pcl::PointXYZRGB>());
-        *tempCloud = *data_down;
+        *tempCloud = *origFrame;
         octree->setInputCloud(tempCloud);
         octree->addPointsFromInputCloud();
         octree->switchBuffers();
-        std::cout << "OH NOOOOOOOOOOOOOOOOOOO" << std::endl;
+	for (int i = 0; i < 10; i++) {
+        	std::cout << "OH NOOOOOOOOOOOOOOOOOOO" << std::endl;
+	}
         return;
     }
     else {
@@ -209,8 +211,9 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
     }
 
     //In case of small point cloud, simply return
-    if (diff_point_vector.size() < 200)
+    if (diff_point_vector.size() < 100)
     {
+	std::cout << "Not detected" << std::endl;
         publishDummy();
         return;
     }
@@ -249,12 +252,22 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
         double maxX;
         double maxY;
         double maxZ;
-        
+	double xDiff = 0;
+	double yDiff = 0;
+        double zDiff = 0;
+	double minXT;
+	double minYT;
+	double minZT;
+	double maxXT;
+	double maxYT;
+	double maxZT;
         bool firstTime = true;
         //Computes min/max x, y, z and color averages
         for (const auto &idx : it->indices)
         {
             pcl::PointXYZRGB tempPoint = (*diff_cloud_ptr)[idx];
+	    Eigen::Vector3d pointVector(tempPoint.x + translationMatrix(0), tempPoint.y + translationMatrix(1), tempPoint.z + translationMatrix(2));
+	    pointVector = rotationMatrix * pointVector;
             if (firstTime) {
                 minX = maxX = tempPoint.x;
                 minY = maxY = tempPoint.y;
@@ -279,12 +292,36 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
             else if(tempPoint.z > maxZ) {
                 maxZ = tempPoint.z;
             }
+
+	    if (pointVector(0) < minXT) {
+		minXT = pointVector(0);
+	    }
+	    else if (pointVector(0) > maxXT) {
+		maxXT = pointVector(0);
+	    }
+	    if (pointVector(1) < minYT) {
+		minYT = pointVector(1);
+	    }
+	    else if (pointVector(1) > maxYT) {
+		maxYT = pointVector(1);
+	    }
+	    if (pointVector(2) < minZT) {
+		minZT = pointVector(2);
+	    }
+	    else if (pointVector(2) > maxZT) {
+		maxZT = pointVector(2);
+	    }
             redAvg += tempPoint.r;
             greenAvg += tempPoint.g;
             blueAvg += tempPoint.b;
             totalCount++;
             centroid.add(tempPoint);
         }
+
+	xDiff = maxX - minX;
+	yDiff = maxY - minY;
+	zDiff = maxZ - minZ;
+
         redAvg /= totalCount;
         blueAvg /= totalCount;
         greenAvg /= totalCount;
@@ -293,8 +330,8 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
         centroid.get(c1);
         //Perform filtering on original pointcloud (undownsampled) with a box filter
         pcl::CropBox<pcl::PointXYZRGB> boxFilter;        
-        boxFilter.setMin(Eigen::Vector4f(c1.x - ((maxX - minX) / 2 + 0.05), c1.y - ((maxY - minY) / 2 + 0.05), c1.z - ((maxZ - minZ) / 2 + 0.05), 1.0));
-        boxFilter.setMax(Eigen::Vector4f(c1.x + ((maxX - minX) / 2 + 0.05), c1.y + ((maxY - minY) / 2 + 0.05), c1.z + ((maxZ - minZ) / 2 + 0.05), 1.0));
+        boxFilter.setMin(Eigen::Vector4f(c1.x - (xDiff / 2 + 0.05), c1.y - (yDiff / 2 + 0.05), c1.z - (zDiff / 2 + 0.05), 1.0));
+        boxFilter.setMax(Eigen::Vector4f(c1.x + (xDiff / 2 + 0.05), c1.y + (yDiff / 2 + 0.05), c1.z + (zDiff / 2 + 0.05), 1.0));
         boxFilter.setInputCloud(data);
         boxFilter.filter(*temp_cloud);
         *person_clusters += *temp_cloud; //Add the result to a pointcloud of people clusters
@@ -318,6 +355,7 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
                 probability += 0.5 / computeAbsDiff(arrOfPeople.personArr.at(i).personCoord, c);
             }
         }
+
         //Update characteristics of person if identified, if not, add to vector
         bool identified = false;
         for (int i = 0; i < arrOfPeople.personArr.size(); i++) {
@@ -328,12 +366,9 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
                 tempVec.push_back(blueAvg);
                 arrOfPeople.personArr.at(i).personCoord = c;
                 arrOfPeople.personArr.at(i).colorArr = tempVec;
-                Eigen::Vector3d lengthVector(maxX - minX + translationMatrix(0), maxY - minY + translationMatrix(1),
-                    maxZ - minZ + translationMatrix(2));
-                lengthVector = rotationMatrix * lengthVector;
-                arrOfPeople.personArr.at(i).bbx = lengthVector(0) - zeroVectorTransformed(0);
-                arrOfPeople.personArr.at(i).bby = lengthVector(1) - zeroVectorTransformed(1);
-                arrOfPeople.personArr.at(i).bbz = lengthVector(2) - zeroVectorTransformed(2);
+                arrOfPeople.personArr.at(i).bbx = maxXT - minXT;
+                arrOfPeople.personArr.at(i).bby = maxYT - minYT;
+                arrOfPeople.personArr.at(i).bbz = maxZT - minZT;
                 arrOfPeople.personArr.at(i).accountedFor = true;
                 identified = true;
             }
@@ -350,12 +385,9 @@ void process(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &data)
             tempPerson.personID = personIDNum++;
             tempPerson.personCoord = c;
             tempPerson.accountedFor = true;
-            Eigen::Vector3d lengthVector(maxX - minX + translationMatrix(0), maxY - minY + translationMatrix(1),
-                    maxZ - minZ + translationMatrix(2));
-            lengthVector = rotationMatrix * lengthVector;
-            tempPerson.bbx = lengthVector(0) - zeroVectorTransformed(0);
-            tempPerson.bby = lengthVector(1) - zeroVectorTransformed(1);
-            tempPerson.bbz = lengthVector(2) - zeroVectorTransformed(2);
+            tempPerson.bbx = maxXT - minXT;
+            tempPerson.bby = maxYT - minYT;
+            tempPerson.bbz = maxZT - minZT;
             tempPerson.talking = false;
             arrOfPeople.personArr.push_back(tempPerson);
         }
@@ -468,6 +500,7 @@ void getTransform(cv::Mat cameraMatrix, cv::Mat distCoeffs, cv::Mat image) {
                            rotationArr.at<double>(0, 2), rotationArr.at<double>(1, 2), rotationArr.at<double>(2, 2);
         translationMatrix = Eigen::Vector3d(-tvecs.at(0)[0], -tvecs.at(0)[1], -tvecs.at(0)[2]);
         zeroVectorTransformed = rotationMatrix * translationMatrix;
+	std::cout << zeroVectorTransformed << std::endl;
     }
 }
 
@@ -605,6 +638,6 @@ int main(int argc, char *argv[])
         color_img.header.stamp.nsec = (ros::Time::now().toSec() - (int) (ros::Time::now().toSec())) * 1e9;
         cloud_publisher.publish(pcl_points);
         color_publisher.publish(color_img);
-        //std::cout << ros::Time::now().toSec() - startTime << std::endl;
+        std::cout << ros::Time::now().toSec() - startTime << std::endl;
     }
 }
